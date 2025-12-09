@@ -1,7 +1,7 @@
 // backend/server.js
 const express = require('express');
 const cors = require('cors');
-const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
+const { PDFDocument, rgb } = require('pdf-lib');
 const { MongoClient } = require('mongodb');
 const crypto = require('crypto');
 const fs = require('fs').promises;
@@ -12,14 +12,19 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use('/signed-pdfs', express.static('signed-pdfs'));
 
+// ✅ trust Render proxy so req.protocol becomes "https"
+app.set('trust proxy', 1);
+
+// ✅ Port: Render gives PORT, local is 3001
 const PORT = process.env.PORT || 3001;
+
+// ✅ Mongo: from env or local
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017';
 const DB_NAME = process.env.DB_NAME || 'pdf_signature_system';
 
-
 let db;
 
-// Connect MongoDB
+// Initialize MongoDB connection
 async function connectDB() {
   const client = new MongoClient(MONGO_URI);
   await client.connect();
@@ -27,357 +32,439 @@ async function connectDB() {
   console.log('Connected to MongoDB');
 }
 
-// PDF hash
+// Compute SHA-256 hash
 function computeHash(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
-// Convert percent → PDF points
+// Convert percentage coordinates to PDF points
 function convertCoordinates(coordinate, pageWidth, pageHeight) {
-  const left = coordinate.x * pageWidth;
-  const top = coordinate.y * pageHeight;
-  const width = coordinate.width * pageWidth;
-  const height = coordinate.height * pageHeight;
-  const bottom = pageHeight - (top + height);
-  return { x: left, y: bottom, width, height };
-}
-
-// Fit image with aspect ratio
-function fitImageInBox(imgW, imgH, boxW, boxH, boxX, boxY) {
-  const scale = Math.min(boxW / imgW, boxH / imgH);
-  const w = imgW * scale;
-  const h = imgH * scale;
-
+  const boxLeftPt = coordinate.x * pageWidth;
+  const boxTopPt = coordinate.y * pageHeight;
+  const boxWidthPt = coordinate.width * pageWidth;
+  const boxHeightPt = coordinate.height * pageHeight;
+  
+  // PDF coordinate system: bottom-left origin
+  const boxBottomPt = pageHeight - (boxTopPt + boxHeightPt);
+  
   return {
-    x: boxX + (boxW - w) / 2,
-    y: boxY + (boxH - h) / 2,
-    width: w,
-    height: h
+    x: boxLeftPt,
+    y: boxBottomPt,
+    width: boxWidthPt,
+    height: boxHeightPt
   };
 }
 
-/* =======================================================================
- 🖋 SIGN PDF ENDPOINT
-======================================================================= */
+// Fit image inside box with aspect ratio preserved (contain behavior)
+function fitImageInBox(imgWidth, imgHeight, boxWidth, boxHeight, boxX, boxY) {
+  const scale = Math.min(boxWidth / imgWidth, boxHeight / imgHeight);
+  
+  const drawWidth = imgWidth * scale;
+  const drawHeight = imgHeight * scale;
+  
+  // Center the image in the box
+  const drawX = boxX + (boxWidth - drawWidth) / 2;
+  const drawY = boxY + (boxHeight - drawHeight) / 2;
+  
+  return {
+    x: drawX,
+    y: drawY,
+    width: drawWidth,
+    height: drawHeight
+  };
+}
+
+// Main endpoint to sign PDF
 app.post('/sign-pdf', async (req, res) => {
   try {
     const { pdfId, pdfBase64, signatureImageBase64, allFields } = req.body;
-
-    console.log('Incoming /sign-pdf:', {
+    
+    console.log('Received /sign-pdf:', {
+      pdfId,
       hasPdfBase64: !!pdfBase64,
       pdfBase64Length: pdfBase64 ? pdfBase64.length : 0,
-      fieldsCount: allFields ? allFields.length : 0
+      hasSignature: !!signatureImageBase64,
+      totalFields: allFields ? allFields.length : 0
     });
-
-    if (!pdfBase64) {
-      return res.status(400).json({
-        success: false,
-        error: 'No PDF data provided (pdfBase64 missing)'
+    
+    if (!pdfId || !allFields || allFields.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required fields: pdfId, allFields' 
       });
     }
 
-    if (!allFields || !Array.isArray(allFields) || allFields.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'allFields is empty or missing'
-      });
-    }
-
-    // Decode PDF from base64 (supports both data URL + raw base64)
     let pdfBytes;
-    try {
-      let base64String = pdfBase64;
-      if (pdfBase64.startsWith('data:application/pdf;base64,')) {
-        base64String = pdfBase64.split(',')[1];
+
+    // ✅ Prefer uploaded PDF base64 if provided
+    if (pdfBase64 && pdfBase64.trim() !== '') {
+      try {
+        pdfBytes = Buffer.from(pdfBase64, 'base64');
+        console.log('PDF decoded from base64:', pdfBytes.length, 'bytes');
+      } catch (decodeError) {
+        console.error('Error decoding PDF base64:', decodeError);
+        return res.status(400).json({
+          success: false,
+          error: 'Failed to decode PDF data: ' + decodeError.message
+        });
       }
-      pdfBytes = Buffer.from(base64String, 'base64');
-      console.log('Decoded PDF bytes:', pdfBytes.length);
-    } catch (e) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid PDF base64: ' + e.message
-      });
+    } else {
+      console.warn('⚠️ No pdfBase64 provided, falling back to sample-pdfs or blank sample');
+      // Fallback: try to load from file system
+      const originalPdfPath = path.join(__dirname, 'sample-pdfs', `${pdfId}.pdf`);
+      try {
+        pdfBytes = await fs.readFile(originalPdfPath);
+      } catch (err) {
+        // If file doesn't exist, create a sample A4 PDF
+        console.log('Creating sample PDF as fallback');
+        const samplePdf = await PDFDocument.create();
+        const page = samplePdf.addPage([595.28, 841.89]); // A4 in points
+        page.drawText('Sample PDF for Signature', {
+          x: 50,
+          y: 800,
+          size: 24
+        });
+        pdfBytes = await samplePdf.save();
+      }
     }
-
+    
+    // Compute original hash
     const originalHash = computeHash(pdfBytes);
-
-    // Load PDF
+    console.log('Original PDF hash:', originalHash);
+    
+    // Load PDF with pdf-lib
     let pdfDoc;
     try {
       pdfDoc = await PDFDocument.load(pdfBytes);
-      console.log(`Loaded original PDF with ${pdfDoc.getPageCount()} pages`);
-    } catch (e) {
+      console.log(`✅ PDF loaded successfully with ${pdfDoc.getPageCount()} pages`);
+    } catch (loadError) {
+      console.error('Error loading PDF:', loadError);
       return res.status(400).json({
         success: false,
-        error: 'Unable to load PDF: ' + e.message
+        error: 'Failed to load PDF: ' + loadError.message
       });
     }
-
-    // Embed a standard font once (for text/date)
-    const helveticaFont = await pdfDoc.embedStandardFont(StandardFonts.Helvetica);
-
-    /* ------------------------------------------------------------
-     EMBED SIGNATURE IMAGE (if exists)
-    ------------------------------------------------------------- */
+    
+    // Embed signature image if provided
     let signatureImage = null;
-    let signatureDims = null;
-
+    let signatureImgDims = null;
     if (signatureImageBase64) {
       try {
-        let sigData = signatureImageBase64;
-        if (sigData.startsWith('data:image/')) {
-          sigData = sigData.split(',')[1];
-        }
-        const sigBytes = Buffer.from(sigData, 'base64');
-        signatureImage = await pdfDoc.embedPng(sigBytes);
-        signatureDims = signatureImage.scale(1);
-        console.log('Signature image embedded');
-      } catch (e) {
-        console.log('Signature embed error', e);
+        const signatureImageBytes = Buffer.from(signatureImageBase64, 'base64');
+        signatureImage = await pdfDoc.embedPng(signatureImageBytes);
+        signatureImgDims = signatureImage.scale(1);
+        console.log('✅ Signature image embedded');
+      } catch (sigError) {
+        console.error('Error embedding signature:', sigError);
+        return res.status(400).json({
+          success: false,
+          error: 'Failed to embed signature: ' + sigError.message
+        });
       }
     }
-
-    /* ------------------------------------------------------------
-     APPLY EACH FIELD
-    ------------------------------------------------------------- */
+    
+    console.log(`Processing ${allFields.length} fields...`);
+    
+    // Process each field
     for (const field of allFields) {
       const pageIndex = (field.page || 1) - 1;
+      
       if (pageIndex >= pdfDoc.getPageCount()) {
-        console.warn(
-          `Skipping field on page ${field.page} (PDF only has ${pdfDoc.getPageCount()} pages)`
-        );
+        console.warn(`⚠️ Page ${field.page} not found (PDF has ${pdfDoc.getPageCount()} pages), skipping field ${field.type}`);
         continue;
       }
-
-      const page = pdfDoc.getPage(pageIndex);
-      const { width: PW, height: PH } = page.getSize();
-      const box = convertCoordinates(field, PW, PH);
-
-      // SIGNATURE FIELD
+      
+      const page = pdfDoc.getPages()[pageIndex];
+      const { width: pageWidth, height: pageHeight } = page.getSize();
+      const box = convertCoordinates(field, pageWidth, pageHeight);
+      
+      // Signature
       if (field.type === 'signature' && signatureImage) {
-        const fit = fitImageInBox(
-          signatureDims.width,
-          signatureDims.height,
+        const fitDims = fitImageInBox(
+          signatureImgDims.width,
+          signatureImgDims.height,
           box.width,
           box.height,
           box.x,
           box.y
         );
-        page.drawImage(signatureImage, fit);
-        continue;
+        
+        page.drawImage(signatureImage, {
+          x: fitDims.x,
+          y: fitDims.y,
+          width: fitDims.width,
+          height: fitDims.height
+        });
+        
+        console.log(`✅ Added signature to page ${field.page}`);
       }
-
-      // TEXT FIELD (NO BORDER)
-      if (field.type === 'text' && field.value) {
+      
+      // Text field
+      else if (field.type === 'text' && field.value) {
         const fontSize = Math.min(box.height * 0.6, 16);
         page.drawText(field.value, {
-          x: box.x + 4,
+          x: box.x,
           y: box.y + (box.height - fontSize) / 2,
           size: fontSize,
-          font: helveticaFont,
           color: rgb(0, 0, 0)
         });
-        continue;
-      }
 
-      // DATE FIELD (NO BORDER)
-      if (field.type === 'date' && field.value) {
+        console.log(`Added text field to page ${field.page}: "${field.value}"`);
+      }
+      
+      // Date field
+      else if (field.type === 'date' && field.value) {
         const fontSize = Math.min(box.height * 0.6, 16);
         page.drawText(field.value, {
-          x: box.x + 4,
+          x: box.x,
           y: box.y + (box.height - fontSize) / 2,
           size: fontSize,
-          font: helveticaFont,
           color: rgb(0, 0, 0)
         });
-        continue;
+
+        console.log(`Added date field to page ${field.page}: "${field.value}"`);
       }
+      
+      // Checkbox
+      else if (field.type === 'checkbox') {
+        const size = Math.min(box.width, box.height) * 0.6;
+        const x = box.x + (box.width - size) / 2;
+        const y = box.y + (box.height - size) / 2;
 
-      // CHECKBOX FIELD
-      if (field.type === 'checkbox') {
-        // smaller, nicer size
-        let size = Math.min(box.width, box.height) * 0.6;
-        // clamp to reasonable range (8–14 pt)
-        size = Math.max(8, Math.min(size, 14));
-
-        const cx = box.x + (box.width - size) / 2;
-        const cy = box.y + (box.height - size) / 2;
-
-        // outer border box
+        // Border square
         page.drawRectangle({
-          x: cx,
-          y: cy,
+          x,
+          y,
           width: size,
           height: size,
-          borderColor: rgb(0, 0, 0),
-          borderWidth: 1
+          borderWidth: 1.5,
+          borderColor: rgb(0.2, 0.2, 0.2)
         });
 
         if (field.value) {
-          // ✅ CHECKED → green tick
-          // Draw tick using two lines
-          const thickness = 1.5;
-          const start1 = { x: cx + size * 0.2, y: cy + size * 0.45 };
-          const mid =    { x: cx + size * 0.45, y: cy + size * 0.2 };
-          const end2 =   { x: cx + size * 0.8,  y: cy + size * 0.8 };
-
-          page.drawLine({
-            start: start1,
-            end: mid,
-            thickness,
-            color: rgb(0.1, 0.6, 0.2) // green
+          // Checked: solid box + tick in white
+          page.drawRectangle({
+            x,
+            y,
+            width: size,
+            height: size,
+            color: rgb(0, 0.45, 0.9)
           });
 
-          page.drawLine({
-            start: mid,
-            end: end2,
-            thickness,
-            color: rgb(0.1, 0.6, 0.2)
+          page.drawText('✓', {
+            x: x + size * 0.18,
+            y: y + size * 0.08,
+            size: size * 0.7,
+            color: rgb(1, 1, 1)
           });
         } else {
-          // ❌ UNCHECKED → cross (X) inside box
-          const thickness = 1;
-
-          const a = { x: cx + size * 0.2, y: cy + size * 0.2 };
-          const b = { x: cx + size * 0.8, y: cy + size * 0.8 };
-          const c = { x: cx + size * 0.8, y: cy + size * 0.2 };
-          const d = { x: cx + size * 0.2, y: cy + size * 0.8 };
-
-          page.drawLine({
-            start: a,
-            end: b,
-            thickness,
-            color: rgb(0.7, 0.1, 0.1) // reddish
-          });
-
-          page.drawLine({
-            start: c,
-            end: d,
-            thickness,
-            color: rgb(0.7, 0.1, 0.1)
+          // Unchecked: subtle X
+          page.drawText('✕', {
+            x: x + size * 0.18,
+            y: y + size * 0.08,
+            size: size * 0.7,
+            color: rgb(0.6, 0.6, 0.6)
           });
         }
 
-        continue;
+        console.log(`Added checkbox to page ${field.page}: ${field.value ? 'checked' : 'unchecked'}`);
       }
 
-      // RADIO BUTTON FIELD
-      if (field.type === 'radio') {
-        // smaller radius
-        let outerR = Math.min(box.width, box.height) * 0.25;
-        outerR = Math.max(4, Math.min(outerR, 8)); // clamp
-
+      // Radio
+      else if (field.type === 'radio') {
+        const radiusOuter = Math.min(box.width, box.height) * 0.3;
         const cx = box.x + box.width / 2;
         const cy = box.y + box.height / 2;
 
-        // Outer circle border
+        // Outer circle
         page.drawEllipse({
           x: cx,
           y: cy,
-          xScale: outerR,
-          yScale: outerR,
-          borderColor: rgb(0, 0, 0),
-          borderWidth: 1
+          xScale: radiusOuter,
+          yScale: radiusOuter,
+          borderWidth: 1.5,
+          borderColor: rgb(0.2, 0.2, 0.2)
         });
 
         if (field.value) {
-          // Inner filled circle
-          const innerR = outerR * 0.6;
+          const radiusInner = radiusOuter * 0.6;
           page.drawEllipse({
             x: cx,
             y: cy,
-            xScale: innerR,
-            yScale: innerR,
-            color: rgb(0.2, 0.4, 0.8)
+            xScale: radiusInner,
+            yScale: radiusInner,
+            color: rgb(0, 0.45, 0.9)
           });
         }
 
-        continue;
+        console.log(`Added radio button to page ${field.page}: ${field.value ? 'selected' : 'unselected'}`);
       }
 
-      // IMAGE FIELD
-      if (field.type === 'image' && field.value) {
+      // Image field
+      else if (field.type === 'image' && field.value) {
         try {
-          const base64 = field.value.includes(',')
-            ? field.value.split(',')[1]
-            : field.value;
+          const base64Data = field.value.split(',')[1];
+          const imageBytes = Buffer.from(base64Data, 'base64');
 
-          const imgBytes = Buffer.from(base64, 'base64');
-          let img;
-
+          let embeddedImage;
           if (field.value.startsWith('data:image/png')) {
-            img = await pdfDoc.embedPng(imgBytes);
+            embeddedImage = await pdfDoc.embedPng(imageBytes);
+          } else if (
+            field.value.startsWith('data:image/jpeg') ||
+            field.value.startsWith('data:image/jpg')
+          ) {
+            embeddedImage = await pdfDoc.embedJpg(imageBytes);
           } else {
-            img = await pdfDoc.embedJpg(imgBytes);
+            console.warn('Unsupported image format, skipping');
+            continue;
           }
 
-          const dims = img.scale(1);
-          const fit = fitImageInBox(
-            dims.width,
-            dims.height,
+          const imgDims = embeddedImage.scale(1);
+          const fitDims = fitImageInBox(
+            imgDims.width,
+            imgDims.height,
             box.width,
             box.height,
             box.x,
             box.y
           );
 
-          page.drawImage(img, fit);
-        } catch (e) {
-          console.log('Image field error', e);
-        }
+          page.drawImage(embeddedImage, {
+            x: fitDims.x,
+            y: fitDims.y,
+            width: fitDims.width,
+            height: fitDims.height
+          });
 
-        continue;
+          console.log(`Added image to page ${field.page}`);
+        } catch (imgError) {
+          console.error('Error embedding image:', imgError);
+        }
       }
     }
-
-    // (No page numbers here – PDF content stays clean)
-
-    // SAVE PDF
-    const signedBytes = await pdfDoc.save();
-    const signedHash = computeHash(signedBytes);
-
-    await fs.mkdir(path.join(__dirname, 'signed-pdfs'), { recursive: true });
-
-    const fileName = `${pdfId || 'pdf'}-signed-${Date.now()}.pdf`;
-    const filePath = path.join(__dirname, 'signed-pdfs', fileName);
-
-    await fs.writeFile(filePath, signedBytes);
-
-    // Store audit
-    const record = {
+    
+    console.log('✅ All fields processed. Saving PDF...');
+    
+    // Save signed PDF
+    const signedPdfBytes = await pdfDoc.save();
+    const signedHash = computeHash(signedPdfBytes);
+    
+    console.log('PDF saved:', {
+      originalSize: pdfBytes.length,
+      signedSize: signedPdfBytes.length,
+      signedHash: signedHash
+    });
+    
+    // Save to disk
+    const signedDir = path.join(__dirname, 'signed-pdfs');
+    await fs.mkdir(signedDir, { recursive: true });
+    
+    const timestamp = Date.now();
+    const signedFilename = `${pdfId}-signed-${timestamp}.pdf`;
+    const signedPath = path.join(signedDir, signedFilename);
+    
+    await fs.writeFile(signedPath, signedPdfBytes);
+    
+    console.log(`✅ Signed PDF saved to: ${signedFilename}`);
+    
+    // ✅ Build URL from the incoming request (no localhost!)
+    const protocol = req.protocol;          // "https" when behind Render proxy
+    const host = req.get('host');           // e.g. "pdf-signature-system.onrender.com"
+    const baseUrl = `${protocol}://${host}`;
+    const signedPdfUrl = `${baseUrl}/signed-pdfs/${signedFilename}`;
+    
+    console.log(`✅ Success! Returning URL: ${signedPdfUrl}`);
+    
+    // Store audit trail in MongoDB
+    const auditRecord = {
       pdfId,
       originalHash,
       signedHash,
       fieldData: allFields,
-      signedFilename: fileName,
+      signedFilename,
       createdAt: new Date()
     };
-    await db.collection('audit_trail').insertOne(record);
-
+    
+    await db.collection('audit_trail').insertOne(auditRecord);
+    
     res.json({
       success: true,
-      signedPdfUrl: `http://localhost:${PORT}/signed-pdfs/${fileName}`,
+      signedPdfUrl,
       originalHash,
       signedHash,
-      auditId: record._id,
-      pageCount: pdfDoc.getPageCount()
+      auditId: auditRecord._id
     });
-
+    
   } catch (error) {
-    console.error('❌ Error in /sign-pdf:', error);
-    res.status(500).json({ success: false, error: error.message });
+    console.error('❌ Error signing PDF:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
 });
 
-/* ==================================================== */
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date() });
+// Get audit trail for a PDF
+app.get('/audit/:pdfId', async (req, res) => {
+  try {
+    const { pdfId } = req.params;
+    const records = await db.collection('audit_trail')
+      .find({ pdfId })
+      .sort({ createdAt: -1 })
+      .toArray();
+    
+    res.json({
+      success: true,
+      records
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
+// Verify PDF hash
+app.post('/verify', async (req, res) => {
+  try {
+    const { pdfUrl, expectedHash } = req.body;
+    
+    const filename = path.basename(pdfUrl);
+    const pdfPath = path.join(__dirname, 'signed-pdfs', filename);
+    const pdfBytes = await fs.readFile(pdfPath);
+    
+    const actualHash = computeHash(pdfBytes);
+    const isValid = actualHash === expectedHash;
+    
+    res.json({
+      success: true,
+      isValid,
+      actualHash,
+      expectedHash
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  const protocol = req.protocol;
+  const host = req.get('host');
+  const baseUrl = `${protocol}://${host}`;
+  res.json({ status: 'ok', timestamp: new Date(), baseUrl });
+});
+
+// Start server
 async function startServer() {
   await connectDB();
-  app.listen(PORT, () => console.log(`Backend running http://localhost:${PORT}`));
+  app.listen(PORT, () => {
+    console.log(`PDF Signature Backend running on http://localhost:${PORT}`);
+  });
 }
 
 startServer().catch(console.error);
