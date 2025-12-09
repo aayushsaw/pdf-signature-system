@@ -28,12 +28,14 @@ export default function PDFSignatureSystem() {
   const [selectedField, setSelectedField] = useState(null);
   const [editingField, setEditingField] = useState(null);
   const [pdfDoc, setPdfDoc] = useState(null);
-  const [pdfDataForBackend, setPdfDataForBackend] = useState(null);
   const [pages, setPages] = useState([]);
   const [signatureData, setSignatureData] = useState(null);
   const [showSignatureModal, setShowSignatureModal] = useState(false);
   const [isSigning, setIsSigning] = useState(false);
   const [scale, setScale] = useState(1.0);
+
+  // ✅ store base64 version of current PDF for backend
+  const [pdfBase64ForBackend, setPdfBase64ForBackend] = useState(null);
   
   const canvasRef = useRef(null);
   const isDrawing = useRef(false);
@@ -70,10 +72,6 @@ export default function PDFSignatureSystem() {
 
     try {
       const dataCopy = new Uint8Array(uint8Data);
-      
-      // Store for backend
-      setPdfDataForBackend(dataCopy);
-      
       const loadingTask = window.pdfjsLib.getDocument({ data: dataCopy });
       const pdf = await loadingTask.promise;
       
@@ -126,6 +124,7 @@ export default function PDFSignatureSystem() {
     }
   }, [scale]);
 
+  // ✅ Handle user PDF upload: store base64 + render
   const handleFileUpload = (e) => {
     const file = e.target.files[0];
     if (!file || file.type !== 'application/pdf') {
@@ -135,16 +134,29 @@ export default function PDFSignatureSystem() {
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      const arrayBuffer = event.target.result;
-      const uint8Array = new Uint8Array(arrayBuffer);
-      loadPDF(uint8Array);
+      const dataUrl = event.target.result; // data:application/pdf;base64,....
+      const base64 = dataUrl.split(',')[1];
+      setPdfBase64ForBackend(base64);
+
+      // Decode base64 to bytes for pdf.js
+      const binaryString = atob(base64);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      loadPDF(bytes);
     };
-    reader.readAsArrayBuffer(file);
+    reader.readAsDataURL(file);
   };
 
+  // ✅ Load built-in sample PDF on first load (also set base64 for backend)
   const loadSamplePDF = () => {
     const base64 = "JVBERi0xLjQKJeLjz9MKMyAwIG9iago8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL1Jlc291cmNlczw8L0ZvbnQ8PC9GMSA0IDAgUj4+Pj4vTWVkaWFCb3hbMCAwIDU5NSA4NDJdL0NvbnRlbnRzIDUgMCBSPj4KZW5kb2JqCjQgMCBvYmoKPDwvVHlwZS9Gb250L1N1YnR5cGUvVHlwZTEvQmFzZUZvbnQvSGVsdmV0aWNhPj4KZW5kb2JqCjUgMCBvYmoKPDwvTGVuZ3RoIDQ0Pj4Kc3RyZWFtCkJUCi9GMSA0OCBUZgoxMDAgNzAwIFRkCihTYW1wbGUgUERGKSBUagpFVAplbmRzdHJlYW0KZW5kb2JqCjIgMCBvYmoKPDwvVHlwZS9QYWdlcy9Db3VudCAxL0tpZHNbMyAwIFJdPj4KZW5kb2JqCjEgMCBvYmoKPDwvVHlwZS9DYXRhbG9nL1BhZ2VzIDIgMCBSPj4KZW5kb2JqCjYgMCBvYmoKPDwvUHJvZHVjZXIocGRmbGliKS9DcmVhdGlvbkRhdGUoRDoyMDI1MDEwMTEyMDAwMFopPj4KZW5kb2JqCnhyZWYKMCA3CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDI5OCAwMDAwMCBuIAowMDAwMDAwMjQ3IDAwMDAwIG4gCjAwMDAwMDAwMTUgMDAwMDAgbiAKMDAwMDAwMDEyNiAwMDAwMCBuIAowMDAwMDAwMTk1IDAwMDAwIG4gCjAwMDAwMDAzNDcgMDAwMDAgbiAKdHJhaWxlcgo8PC9TaXplIDcvUm9vdCAxIDAgUi9JbmZvIDYgMCBSPj4Kc3RhcnR4cmVmCjQyNQolJUVPRgo=";
-    
+
+    setPdfBase64ForBackend(base64);
+
     const binaryString = atob(base64);
     const bytes = new Uint8Array(binaryString.length);
     for (let i = 0; i < binaryString.length; i++) {
@@ -395,27 +407,16 @@ export default function PDFSignatureSystem() {
       return;
     }
 
-    if (!pdfDataForBackend) {
-      alert('PDF data not loaded. Please upload a PDF first.');
+    if (!pdfBase64ForBackend) {
+      alert('PDF data not loaded. Please upload a PDF or wait for sample to load.');
       return;
     }
 
     setIsSigning(true);
 
     try {
-      // Convert PDF data to base64 more reliably
-      let pdfBase64 = '';
-      const chunkSize = 0x8000; // Process in chunks to avoid call stack size exceeded
-      
-      for (let i = 0; i < pdfDataForBackend.length; i += chunkSize) {
-        const chunk = pdfDataForBackend.subarray(i, i + chunkSize);
-        pdfBase64 += String.fromCharCode.apply(null, Array.from(chunk));
-      }
-      pdfBase64 = btoa(pdfBase64);
-      
       console.log('Sending PDF to backend:', {
-        pdfSize: pdfDataForBackend.length,
-        base64Size: pdfBase64.length,
+        base64Size: pdfBase64ForBackend.length,
         totalFields: fields.length,
         pages: pages.length
       });
@@ -425,7 +426,7 @@ export default function PDFSignatureSystem() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           pdfId: 'uploaded-pdf-' + Date.now(),
-          pdfBase64: pdfBase64,
+          pdfBase64: pdfBase64ForBackend,
           signatureImageBase64: signatureData.split(',')[1],
           coordinates: signatureFields,
           allFields: fields,
@@ -436,7 +437,7 @@ export default function PDFSignatureSystem() {
       const result = await response.json();
       
       if (result.success) {
-        const totalFields = fields.length; // ✅ now used
+        const totalFields = fields.length; // used
         const textFields = fields.filter(f => f.type === FIELD_TYPES.TEXT).length;
         const dateFields = fields.filter(f => f.type === FIELD_TYPES.DATE).length;
         const checkboxFields = fields.filter(f => f.type === FIELD_TYPES.CHECKBOX).length;
@@ -501,7 +502,6 @@ export default function PDFSignatureSystem() {
                 ? `${tool.color} text-white scale-110` 
                 : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
             }`}
-
             title={tool.label}
           >
             <tool.icon size={24} />
@@ -619,7 +619,7 @@ export default function PDFSignatureSystem() {
                             />
                           ) : (
                             <div 
-                              className="w-full h-full px-2 flex items-center text-sm text-gray-700"
+                              className="w-full h-full px-2 flex items:center text-sm text-gray-700"
                               style={{ fontSize: `${Math.min(field.height * page.height * 0.5, 16)}px` }}
                             >
                               {field.value || 'Double-click to edit'}
