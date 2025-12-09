@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FileText, PenTool, Image, Calendar, Square, Circle, Download, Upload, ZoomIn, ZoomOut } from 'lucide-react';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+// ✅ CRA-style env var (Netlify: REACT_APP_API_BASE_URL)
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:3001';
 
 const FIELD_TYPES = {
   TEXT: 'text',
@@ -27,14 +28,12 @@ export default function PDFSignatureSystem() {
   const [selectedField, setSelectedField] = useState(null);
   const [editingField, setEditingField] = useState(null);
   const [pdfDoc, setPdfDoc] = useState(null);
+  const [pdfDataForBackend, setPdfDataForBackend] = useState(null);
   const [pages, setPages] = useState([]);
   const [signatureData, setSignatureData] = useState(null);
   const [showSignatureModal, setShowSignatureModal] = useState(false);
   const [isSigning, setIsSigning] = useState(false);
   const [scale, setScale] = useState(1.0);
-
-  // 👇 NEW: store PDF as base64 data URL for backend
-  const [pdfBase64ForBackend, setPdfBase64ForBackend] = useState(null);
   
   const canvasRef = useRef(null);
   const isDrawing = useRef(false);
@@ -42,6 +41,8 @@ export default function PDFSignatureSystem() {
   const imageInputRef = useRef(null);
   const currentImageFieldRef = useRef(null);
 
+  // ✅ Load pdf.js script + sample PDF
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const script = document.createElement('script');
     script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
@@ -61,7 +62,6 @@ export default function PDFSignatureSystem() {
     };
   }, []);
 
-  // Load PDF into pdf.js from bytes
   const loadPDF = async (uint8Data) => {
     if (!window.pdfjsLib) {
       setTimeout(() => loadPDF(uint8Data), 100);
@@ -70,6 +70,10 @@ export default function PDFSignatureSystem() {
 
     try {
       const dataCopy = new Uint8Array(uint8Data);
+      
+      // Store for backend
+      setPdfDataForBackend(dataCopy);
+      
       const loadingTask = window.pdfjsLib.getDocument({ data: dataCopy });
       const pdf = await loadingTask.promise;
       
@@ -114,24 +118,14 @@ export default function PDFSignatureSystem() {
     };
   };
 
+  // ✅ Re-render pages when scale changes
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (pdfDoc) {
       renderAllPages(pdfDoc);
     }
-  }, [scale]); // re-render on zoom
+  }, [scale]);
 
-  // 🔁 Helper: convert base64 (no prefix) to Uint8Array
-  const base64ToUint8Array = (base64) => {
-    const binaryString = atob(base64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-    return bytes;
-  };
-
-  // Handle user PDF upload
   const handleFileUpload = (e) => {
     const file = e.target.files[0];
     if (!file || file.type !== 'application/pdf') {
@@ -141,33 +135,23 @@ export default function PDFSignatureSystem() {
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      const dataUrl = event.target.result; // "data:application/pdf;base64,...."
-      if (typeof dataUrl !== 'string') {
-        alert('Failed to read PDF file');
-        return;
-      }
-
-      // Store for backend
-      setPdfBase64ForBackend(dataUrl);
-
-      // Convert to bytes for pdf.js
-      const base64 = dataUrl.split(',')[1];
-      const bytes = base64ToUint8Array(base64);
-      loadPDF(bytes);
+      const arrayBuffer = event.target.result;
+      const uint8Array = new Uint8Array(arrayBuffer);
+      loadPDF(uint8Array);
     };
-    reader.readAsDataURL(file); // ✅ read as Data URL
+    reader.readAsArrayBuffer(file);
   };
 
-  // Load a sample PDF on start
   const loadSamplePDF = () => {
     const base64 = "JVBERi0xLjQKJeLjz9MKMyAwIG9iago8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL1Jlc291cmNlczw8L0ZvbnQ8PC9GMSA0IDAgUj4+Pj4vTWVkaWFCb3hbMCAwIDU5NSA4NDJdL0NvbnRlbnRzIDUgMCBSPj4KZW5kb2JqCjQgMCBvYmoKPDwvVHlwZS9Gb250L1N1YnR5cGUvVHlwZTEvQmFzZUZvbnQvSGVsdmV0aWNhPj4KZW5kb2JqCjUgMCBvYmoKPDwvTGVuZ3RoIDQ0Pj4Kc3RyZWFtCkJUCi9GMSA0OCBUZgoxMDAgNzAwIFRkCihTYW1wbGUgUERGKSBUagpFVAplbmRzdHJlYW0KZW5kb2JqCjIgMCBvYmoKPDwvVHlwZS9QYWdlcy9Db3VudCAxL0tpZHNbMyAwIFJdPj4KZW5kb2JqCjEgMCBvYmoKPDwvVHlwZS9DYXRhbG9nL1BhZ2VzIDIgMCBSPj4KZW5kb2JqCjYgMCBvYmoKPDwvUHJvZHVjZXIocGRmbGliKS9DcmVhdGlvbkRhdGUoRDoyMDI1MDEwMTEyMDAwMFopPj4KZW5kb2JqCnhyZWYKMCA3CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDI5OCAwMDAwMCBuIAowMDAwMDAwMjQ3IDAwMDAwIG4gCjAwMDAwMDAwMTUgMDAwMDAgbiAKMDAwMDAwMDEyNiAwMDAwMCBuIAowMDAwMDAwMTk1IDAwMDAwIG4gCjAwMDAwMDAzNDcgMDAwMDAgbiAKdHJhaWxlcgo8PC9TaXplIDcvUm9vdCAxIDAgUi9JbmZvIDYgMCBSPj4Kc3RhcnR4cmVmCjQyNQolJUVPRgo=";
     
-    const bytes = base64ToUint8Array(base64);
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    
     loadPDF(bytes);
-
-    // also store for backend (as proper data URL)
-    const dataUrl = `data:application/pdf;base64,${base64}`;
-    setPdfBase64ForBackend(dataUrl);
   };
 
   const handlePageClick = (e, pageNum, pageContainer) => {
@@ -399,7 +383,6 @@ export default function PDFSignatureSystem() {
     }
   };
 
-  // 🔥 Sign PDF: send pdfBase64ForBackend directly
   const handleSignPDF = async () => {
     if (!signatureData) {
       alert('Please draw a signature first');
@@ -412,7 +395,7 @@ export default function PDFSignatureSystem() {
       return;
     }
 
-    if (!pdfBase64ForBackend) {
+    if (!pdfDataForBackend) {
       alert('PDF data not loaded. Please upload a PDF first.');
       return;
     }
@@ -420,9 +403,19 @@ export default function PDFSignatureSystem() {
     setIsSigning(true);
 
     try {
+      // Convert PDF data to base64 more reliably
+      let pdfBase64 = '';
+      const chunkSize = 0x8000; // Process in chunks to avoid call stack size exceeded
+      
+      for (let i = 0; i < pdfDataForBackend.length; i += chunkSize) {
+        const chunk = pdfDataForBackend.subarray(i, i + chunkSize);
+        pdfBase64 += String.fromCharCode.apply(null, Array.from(chunk));
+      }
+      pdfBase64 = btoa(pdfBase64);
+      
       console.log('Sending PDF to backend:', {
-        hasPdfBase64: !!pdfBase64ForBackend,
-        pdfBase64Length: pdfBase64ForBackend.length,
+        pdfSize: pdfDataForBackend.length,
+        base64Size: pdfBase64.length,
         totalFields: fields.length,
         pages: pages.length
       });
@@ -432,8 +425,7 @@ export default function PDFSignatureSystem() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           pdfId: 'uploaded-pdf-' + Date.now(),
-          // we send full data URL, backend can handle it
-          pdfBase64: pdfBase64ForBackend,
+          pdfBase64: pdfBase64,
           signatureImageBase64: signatureData.split(',')[1],
           coordinates: signatureFields,
           allFields: fields,
@@ -444,23 +436,19 @@ export default function PDFSignatureSystem() {
       const result = await response.json();
       
       if (result.success) {
-        const totalFields = fields.length;
+        const totalFields = fields.length; // ✅ now used
         const textFields = fields.filter(f => f.type === FIELD_TYPES.TEXT).length;
         const dateFields = fields.filter(f => f.type === FIELD_TYPES.DATE).length;
         const checkboxFields = fields.filter(f => f.type === FIELD_TYPES.CHECKBOX).length;
         
         alert(
           `PDF signed successfully!\n\n` +
-          `Total Pages (frontend): ${pages.length}\n` +
-          (result.pageCount ? `Total Pages (backend): ${result.pageCount}\n` : '') +
-          `Fields Added:\n` +
-          `- Signatures: ${signatureFields.length}\n` +
-          `- Text: ${textFields}\n` +
-          `- Date: ${dateFields}\n` +
-          `- Checkbox: ${checkboxFields}\n\n` +
+          `Total Pages: ${pages.length}\n` +
+          `Total Fields: ${totalFields}\n` +
+          `Fields Added:\n- Signatures: ${signatureFields.length}\n` +
+          `- Text: ${textFields}\n- Date: ${dateFields}\n- Checkbox: ${checkboxFields}\n\n` +
           `Original Hash: ${result.originalHash}\n` +
-          `Signed Hash: ${result.signedHash}\n\n` +
-          `Opening signed PDF...`
+          `Signed Hash: ${result.signedHash}\n\nOpening signed PDF...`
         );
         window.open(result.signedPdfUrl, '_blank');
       } else {
@@ -468,7 +456,7 @@ export default function PDFSignatureSystem() {
       }
     } catch (error) {
       console.error('Full error:', error);
-      alert('Error connecting to backend. Make sure the server is running on http://localhost:3001\n\nError: ' + error.message);
+      alert('Error connecting to backend. Make sure the server is running.\n\nError: ' + error.message);
     } finally {
       setIsSigning(false);
     }
@@ -513,6 +501,7 @@ export default function PDFSignatureSystem() {
                 ? `${tool.color} text-white scale-110` 
                 : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
             }`}
+
             title={tool.label}
           >
             <tool.icon size={24} />
@@ -566,9 +555,6 @@ export default function PDFSignatureSystem() {
             {pages.map((page) => (
               <div key={page.pageNum} className="relative">
                 <div className="bg-white shadow-2xl rounded-lg overflow-visible relative">
-                  <div className="absolute -top-8 left-0 text-sm text-gray-500 font-medium">
-                    Page {page.pageNum}
-                  </div>
                   <div
                     className="relative cursor-crosshair"
                     onClick={(e) => handlePageClick(e, page.pageNum, e.currentTarget)}
@@ -596,7 +582,7 @@ export default function PDFSignatureSystem() {
                           width: `${field.width * 100}%`,
                           height: `${field.height * 100}%`,
                           border: selectedField === field.id ? '2px dashed #3b82f6' : '2px dashed #9ca3af',
-                          backgroundColor: 'rgba(59, 130, 246, 0.1)' ,
+                          backgroundColor: 'rgba(59, 130, 246, 0.1)',
                           cursor: 'move',
                           zIndex: selectedField === field.id ? 10 : 5,
                           display: 'flex',
@@ -627,12 +613,14 @@ export default function PDFSignatureSystem() {
                               onBlur={() => setEditingField(null)}
                               autoFocus
                               className="w-full h-full px-2 text-sm bg-white border-none outline-none"
+                              style={{ fontSize: `${Math.min(field.height * page.height * 0.5, 16)}px` }}
                               onClick={(e) => e.stopPropagation()}
                               onMouseDown={(e) => e.stopPropagation()}
                             />
                           ) : (
                             <div 
                               className="w-full h-full px-2 flex items-center text-sm text-gray-700"
+                              style={{ fontSize: `${Math.min(field.height * page.height * 0.5, 16)}px` }}
                             >
                               {field.value || 'Double-click to edit'}
                             </div>
@@ -648,12 +636,14 @@ export default function PDFSignatureSystem() {
                               onBlur={() => setEditingField(null)}
                               autoFocus
                               className="w-full h-full px-2 text-sm bg-white border-none outline-none"
+                              style={{ fontSize: `${Math.min(field.height * page.height * 0.5, 16)}px` }}
                               onClick={(e) => e.stopPropagation()}
                               onMouseDown={(e) => e.stopPropagation()}
                             />
                           ) : (
                             <div 
                               className="w-full h-full px-2 flex items-center text-sm text-gray-700"
+                              style={{ fontSize: `${Math.min(field.height * page.height * 0.5, 16)}px` }}
                             >
                               {field.value || 'Double-click to edit'}
                             </div>
@@ -672,8 +662,8 @@ export default function PDFSignatureSystem() {
                             <div 
                               className={`border-2 border-gray-600 rounded ${field.value ? 'bg-blue-500' : 'bg-white'}`}
                               style={{
-                                width: `20px`,
-                                height: `20px`,
+                                width: `${Math.min(field.height * page.height * 0.6, 24)}px`,
+                                height: `${Math.min(field.height * page.height * 0.6, 24)}px`,
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center'
@@ -698,8 +688,8 @@ export default function PDFSignatureSystem() {
                             <div 
                               className={`border-2 border-gray-600 rounded-full ${field.value ? 'bg-blue-500' : 'bg-white'}`}
                               style={{
-                                width: `20px`,
-                                height: `20px`,
+                                width: `${Math.min(field.height * page.height * 0.6, 24)}px`,
+                                height: `${Math.min(field.height * page.height * 0.6, 24)}px`,
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center'
@@ -781,6 +771,13 @@ export default function PDFSignatureSystem() {
                         )}
                       </div>
                     ))}
+                  </div>
+
+                  {/* Preview-only page badge */}
+                  <div
+                    className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-black/60 text-white text-xs px-3 py-1 rounded-full pointer-events-none"
+                  >
+                    Page {page.pageNum} of {pages.length}
                   </div>
                 </div>
               </div>
