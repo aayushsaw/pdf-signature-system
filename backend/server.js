@@ -226,76 +226,125 @@ app.post('/sign-pdf', async (req, res) => {
       }
       
       // Checkbox
-      else if (field.type === 'checkbox') {
-        const size = Math.min(box.width, box.height) * 0.6;
-        const x = box.x + (box.width - size) / 2;
-        const y = box.y + (box.height - size) / 2;
+      // CHECKBOX (small & clean)
+else if (field.type === 'checkbox') {
+    const size = Math.min(box.width, box.height) * 0.6;
+    const x = box.x + (box.width - size) / 2;
+    const y = box.y + (box.height - size) / 2;
 
-        // Border square
-        page.drawRectangle({
-          x,
-          y,
-          width: size,
-          height: size,
-          borderWidth: 1.5,
-          borderColor: rgb(0.2, 0.2, 0.2)
-        });
+    // Border
+    page.drawRectangle({
+      x,
+      y,
+      width: size,
+      height: size,
+      borderColor: rgb(0, 0, 0),
+      borderWidth: 1.2
+    });
 
-        if (field.value) {
-          // Checked: solid box + tick in white
-          page.drawRectangle({
-            x,
-            y,
-            width: size,
-            height: size,
-            color: rgb(0, 0.45, 0.9)
-          });
+    // If checked → draw a small tick using lines
+    if (field.value) {
+      const tickX = x + size * 0.2;
+      const tickY = y + size * 0.45;
+      const tickX2 = x + size * 0.45;
+      const tickY2 = y + size * 0.2;
+      const tickX3 = x + size * 0.8;
+      const tickY3 = y + size * 0.75;
 
-          page.drawText('✓', {
-            x: x + size * 0.18,
-            y: y + size * 0.08,
-            size: size * 0.7,
-            color: rgb(1, 1, 1)
-          });
-        } else {
-          // Unchecked: subtle X
-          page.drawText('✕', {
-            x: x + size * 0.18,
-            y: y + size * 0.08,
-            size: size * 0.7,
-            color: rgb(0.6, 0.6, 0.6)
-          });
-        }
+      page.drawLine({
+        start: { x: tickX, y: tickY },
+        end: { x: tickX2, y: tickY2 },
+        thickness: 1.5,
+        color: rgb(0, 0.6, 0)
+      });
 
-        console.log(`Added checkbox to page ${field.page}: ${field.value ? 'checked' : 'unchecked'}`);
-      }
+      page.drawLine({
+        start: { x: tickX2, y: tickY2 },
+        end: { x: tickX3, y: tickY3 },
+        thickness: 1.5,
+        color: rgb(0, 0.6, 0)
+      });
+    }
+    console.log(`Added checkbox to page ${field.page}: ${field.value ? 'checked' : 'unchecked'}`);
+}
+
+
+
+
+
+      // else if (field.type === 'checkbox') {
+      //   const size = Math.min(box.width, box.height) * 0.6;
+      //   const x = box.x + (box.width - size) / 2;
+      //   const y = box.y + (box.height - size) / 2;
+
+      //   // Border square
+      //   page.drawRectangle({
+      //     x,
+      //     y,
+      //     width: size,
+      //     height: size,
+      //     borderWidth: 1.5,
+      //     borderColor: rgb(0.2, 0.2, 0.2)
+      //   });
+
+      //   if (field.value) {
+      //     // Checked: solid box + tick in white
+      //     page.drawRectangle({
+      //       x,
+      //       y,
+      //       width: size,
+      //       height: size,
+      //       color: rgb(0, 0.45, 0.9)
+      //     });
+
+      //     page.drawText('✓', {
+      //       x: x + size * 0.18,
+      //       y: y + size * 0.08,
+      //       size: size * 0.7,
+      //       color: rgb(1, 1, 1)
+      //     });
+      //   } else {
+      //     // Unchecked: subtle X
+      //     page.drawText('✕', {
+      //       x: x + size * 0.18,
+      //       y: y + size * 0.08,
+      //       size: size * 0.7,
+      //       color: rgb(0.6, 0.6, 0.6)
+      //     });
+      //   }
+
+        
+      // }
 
       // Radio
-      else if (field.type === 'radio') {
-        const radiusOuter = Math.min(box.width, box.height) * 0.3;
-        const cx = box.x + box.width / 2;
-        const cy = box.y + box.height / 2;
 
-        // Outer circle
-        page.drawEllipse({
-          x: cx,
-          y: cy,
-          xScale: radiusOuter,
-          yScale: radiusOuter,
-          borderWidth: 1.5,
-          borderColor: rgb(0.2, 0.2, 0.2)
-        });
+        // RADIO (small & clean)
+else if (field.type === 'radio') {
+    const size = Math.min(box.width, box.height) * 0.6;
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+    const radius = size / 2;
 
-        if (field.value) {
-          const radiusInner = radiusOuter * 0.6;
-          page.drawEllipse({
-            x: cx,
-            y: cy,
-            xScale: radiusInner,
-            yScale: radiusInner,
-            color: rgb(0, 0.45, 0.9)
-          });
-        }
+    // Outline Circle
+    page.drawEllipse({
+      x: cx,
+      y: cy,
+      xScale: radius,
+      yScale: radius,
+      borderWidth: 1.2,
+      borderColor: rgb(0, 0, 0)
+    });
+
+    // If selected → draw small filled dot
+    if (field.value) {
+      page.drawEllipse({
+        x: cx,
+        y: cy,
+        xScale: radius * 0.5,
+        yScale: radius * 0.5,
+        color: rgb(0, 0.4, 1)
+      });
+    }
 
         console.log(`Added radio button to page ${field.page}: ${field.value ? 'selected' : 'unselected'}`);
       }
